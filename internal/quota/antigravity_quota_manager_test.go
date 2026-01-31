@@ -78,7 +78,7 @@ func TestQuotaCfgSnapshot_Defaults(t *testing.T) {
 	mgr := coreauth.NewManager(store, nil, nil)
 	qm := NewAntigravityQuotaManager(cfg, mgr)
 
-	enabled, pollInterval, cacheTTL, persistInterval, concurrency := qm.quotaCfgSnapshot()
+	enabled, pollInterval, cacheTTL, concurrency := qm.quotaCfgSnapshot()
 
 	if enabled {
 		t.Error("expected enabled=false by default")
@@ -88,9 +88,6 @@ func TestQuotaCfgSnapshot_Defaults(t *testing.T) {
 	}
 	if cacheTTL != 10*time.Minute {
 		t.Errorf("expected cacheTTL=10m, got %v", cacheTTL)
-	}
-	if persistInterval != 0 {
-		t.Errorf("expected persistInterval=0 (default from empty config), got %v", persistInterval)
 	}
 	if concurrency != 4 {
 		t.Errorf("expected concurrency=4, got %d", concurrency)
@@ -104,7 +101,6 @@ func TestQuotaCfgSnapshot_CustomValues(t *testing.T) {
 			Enabled:                true,
 			PollIntervalSeconds:    60,
 			CacheTTLSeconds:        120,
-			PersistIntervalSeconds: 300,
 			Concurrency:            8,
 		},
 	}
@@ -112,7 +108,7 @@ func TestQuotaCfgSnapshot_CustomValues(t *testing.T) {
 	mgr := coreauth.NewManager(store, nil, nil)
 	qm := NewAntigravityQuotaManager(cfg, mgr)
 
-	enabled, pollInterval, cacheTTL, persistInterval, concurrency := qm.quotaCfgSnapshot()
+	enabled, pollInterval, cacheTTL, concurrency := qm.quotaCfgSnapshot()
 
 	if !enabled {
 		t.Error("expected enabled=true")
@@ -122,9 +118,6 @@ func TestQuotaCfgSnapshot_CustomValues(t *testing.T) {
 	}
 	if cacheTTL != 120*time.Second {
 		t.Errorf("expected cacheTTL=120s, got %v", cacheTTL)
-	}
-	if persistInterval != 300*time.Second {
-		t.Errorf("expected persistInterval=300s, got %v", persistInterval)
 	}
 	if concurrency != 8 {
 		t.Errorf("expected concurrency=8, got %d", concurrency)
@@ -141,7 +134,6 @@ func TestQuotaCfgSnapshot_Clamping(t *testing.T) {
 			Enabled:                true,
 			PollIntervalSeconds:    5,  // < 10
 			CacheTTLSeconds:        10, // < 30
-			PersistIntervalSeconds: 0,
 			Concurrency:            100, // > 32
 		},
 	}
@@ -149,16 +141,13 @@ func TestQuotaCfgSnapshot_Clamping(t *testing.T) {
 	mgr := coreauth.NewManager(store, nil, nil)
 	qm := NewAntigravityQuotaManager(cfg, mgr)
 
-	_, pollInterval, cacheTTL, persistInterval, concurrency := qm.quotaCfgSnapshot()
+	_, pollInterval, cacheTTL, concurrency := qm.quotaCfgSnapshot()
 
 	if pollInterval != 10*time.Second {
 		t.Errorf("expected pollInterval clamped to 10s, got %v", pollInterval)
 	}
 	if cacheTTL != 30*time.Second {
 		t.Errorf("expected cacheTTL clamped to 30s, got %v", cacheTTL)
-	}
-	if persistInterval != 0 {
-		t.Errorf("expected persistInterval=0, got %v", persistInterval)
 	}
 	if concurrency != 32 {
 		t.Errorf("expected concurrency clamped to 32, got %d", concurrency)
@@ -316,7 +305,6 @@ func TestPersistSnapshot_RespectsIntervalAndHash(t *testing.T) {
 		AntigravityQuota: config.AntigravityQuotaConfig{
 			Enabled:                false,
 			CacheTTLSeconds:        1, // 短 TTL 方便测试
-			PersistIntervalSeconds: 60,
 		},
 	}
 	store := newMemoryAuthStore()
@@ -633,7 +621,6 @@ func TestPersistSnapshot_ForceBypassesThrottling(t *testing.T) {
 		AntigravityQuota: config.AntigravityQuotaConfig{
 			Enabled:                false,
 			CacheTTLSeconds:        1,
-			PersistIntervalSeconds: 3600, // 1 小时的节流间隔
 		},
 	}
 	store := newMemoryAuthStore()
@@ -913,7 +900,7 @@ func TestQuotaCfgSnapshot_NilConfig(t *testing.T) {
 	mgr := coreauth.NewManager(store, nil, nil)
 	qm := NewAntigravityQuotaManager(nil, mgr)
 
-	enabled, pollInterval, cacheTTL, persistInterval, concurrency := qm.quotaCfgSnapshot()
+	enabled, pollInterval, cacheTTL, concurrency := qm.quotaCfgSnapshot()
 
 	if enabled {
 		t.Error("expected enabled=false with nil config")
@@ -923,9 +910,6 @@ func TestQuotaCfgSnapshot_NilConfig(t *testing.T) {
 	}
 	if cacheTTL != 10*time.Minute {
 		t.Errorf("expected cacheTTL=10m, got %v", cacheTTL)
-	}
-	if persistInterval != time.Hour {
-		t.Errorf("expected persistInterval=1h, got %v", persistInterval)
 	}
 	if concurrency != 4 {
 		t.Errorf("expected concurrency=4, got %d", concurrency)

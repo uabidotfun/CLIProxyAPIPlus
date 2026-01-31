@@ -84,7 +84,6 @@ routing:
 #   enabled: true
 #   poll-interval: 1800      # seconds
 #   cache-ttl: 600           # seconds
-#   persist-interval: 3600   # seconds
 #   concurrency: 4
 
 # When true, enable authentication for the WebSocket API (/v1/ws).

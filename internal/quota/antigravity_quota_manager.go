@@ -68,11 +68,10 @@ type AntigravityQuotaManager struct {
 	pollMu     sync.Mutex
 	pollCancel context.CancelFunc
 
-	// persistMu 保护 lastPersistHash/lastPersistAt 的并发读写。
+	// persistMu 保护 lastPersistHash 的并发读写。
 	persistMu sync.Mutex
-	// 写回节流：记录最近一次写回的 hash，避免频繁写文件。
+	// 写回节流：记录最近一次写回的 hash，避免数据未变时频繁写文件。
 	lastPersistHash map[string]string
-	lastPersistAt   map[string]time.Time
 }
 
 var (
@@ -104,17 +103,16 @@ func NewAntigravityQuotaManager(cfg *config.Config, coreManager *coreauth.Manage
 		snapshots:       make(map[string]*AntigravityQuotaSnapshot),
 		stopCh:          make(chan struct{}),
 		lastPersistHash: make(map[string]string),
-		lastPersistAt:   make(map[string]time.Time),
 	}
 }
 
 // Start 启动定期轮询。
-// enabled/poll/cacheTTL/persistInterval/concurrency 由配置控制；若 cfg 缺失则使用保守默认值。
+// enabled/poll/cacheTTL/concurrency 由配置控制；若 cfg 缺失则使用保守默认值。
 func (m *AntigravityQuotaManager) Start() {
 	if m == nil {
 		return
 	}
-	enabled, _, _, _, _ := m.quotaCfgSnapshot()
+	enabled, _, _, _ := m.quotaCfgSnapshot()
 	if !enabled {
 		return
 	}
@@ -135,7 +133,7 @@ func (m *AntigravityQuotaManager) startPolling() {
 		m.pollCancel = nil
 	}
 
-	enabled, pollInterval, _, _, _ := m.quotaCfgSnapshot()
+	enabled, pollInterval, _, _ := m.quotaCfgSnapshot()
 	if !enabled || pollInterval <= 0 {
 		return
 	}
@@ -191,9 +189,9 @@ func (m *AntigravityQuotaManager) pollOnce(ctx context.Context) {
 }
 
 // quotaCfgSnapshot 返回当前配置（带默认值回退和边界钳制）。
-func (m *AntigravityQuotaManager) quotaCfgSnapshot() (enabled bool, pollInterval, cacheTTL, persistInterval time.Duration, concurrency int) {
+func (m *AntigravityQuotaManager) quotaCfgSnapshot() (enabled bool, pollInterval, cacheTTL time.Duration, concurrency int) {
 	if m == nil {
-		return false, 30 * time.Minute, 10 * time.Minute, time.Hour, 4
+		return false, 30 * time.Minute, 10 * time.Minute, 4
 	}
 	m.cfgMu.RLock()
 	cfg := m.cfg
@@ -203,7 +201,6 @@ func (m *AntigravityQuotaManager) quotaCfgSnapshot() (enabled bool, pollInterval
 	enabled = false
 	pollInterval = 30 * time.Minute
 	cacheTTL = 10 * time.Minute
-	persistInterval = time.Hour
 	concurrency = 4
 
 	if cfg == nil {
@@ -228,14 +225,6 @@ func (m *AntigravityQuotaManager) quotaCfgSnapshot() (enabled bool, pollInterval
 		cacheTTL = 30 * time.Second
 	}
 
-	if qc.PersistIntervalSeconds >= 0 {
-		persistInterval = time.Duration(qc.PersistIntervalSeconds) * time.Second
-	}
-	// persist-interval < 0 → 钳制为 0（禁用节流）。
-	if persistInterval < 0 {
-		persistInterval = 0
-	}
-
 	if qc.Concurrency > 0 {
 		concurrency = qc.Concurrency
 	}
@@ -254,13 +243,13 @@ func (m *AntigravityQuotaManager) UpdateConfig(cfg *config.Config) {
 	if m == nil {
 		return
 	}
-	oldEnabled, oldPoll, _, _, _ := m.quotaCfgSnapshot()
+	oldEnabled, oldPoll, _, _ := m.quotaCfgSnapshot()
 
 	m.cfgMu.Lock()
 	m.cfg = cfg
 	m.cfgMu.Unlock()
 
-	newEnabled, newPoll, _, _, _ := m.quotaCfgSnapshot()
+	newEnabled, newPoll, _, _ := m.quotaCfgSnapshot()
 
 	// enabled 变化。
 	if !oldEnabled && newEnabled {
@@ -357,7 +346,7 @@ func (m *AntigravityQuotaManager) RefreshAll(ctx context.Context, force bool, pe
 	}
 
 	// 读取并发数配置。
-	_, _, _, _, concurrency := m.quotaCfgSnapshot()
+	_, _, _, concurrency := m.quotaCfgSnapshot()
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -463,21 +452,14 @@ func (m *AntigravityQuotaManager) persistSnapshot(ctx context.Context, auth *cor
 		ctx = context.Background()
 	}
 
-	// 节流判断：hash 变化 + persist-interval。
+	// 节流判断：仅当 hash 变化时才写回。
 	if !force {
 		m.persistMu.Lock()
 		lastHash := m.lastPersistHash[id]
-		lastAt := m.lastPersistAt[id]
 		m.persistMu.Unlock()
 
 		// hash 未变化，跳过写回。
 		if lastHash != "" && lastHash == snap.RawSHA256 {
-			return nil
-		}
-
-		// persist-interval 未到，跳过写回。
-		_, _, _, persistInterval, _ := m.quotaCfgSnapshot()
-		if persistInterval > 0 && !lastAt.IsZero() && time.Since(lastAt) < persistInterval {
 			return nil
 		}
 	}
@@ -508,7 +490,6 @@ func (m *AntigravityQuotaManager) persistSnapshot(ctx context.Context, auth *cor
 
 	m.persistMu.Lock()
 	m.lastPersistHash[id] = snap.RawSHA256
-	m.lastPersistAt[id] = time.Now()
 	m.persistMu.Unlock()
 	return nil
 }
@@ -628,7 +609,7 @@ func (m *AntigravityQuotaManager) fetchAvailableModels(ctx context.Context, auth
 		}
 		sum := sha256.Sum256(raw)
 		// 使用配置中的 cache-ttl。
-		_, _, cacheTTL, _, _ := m.quotaCfgSnapshot()
+		_, _, cacheTTL, _ := m.quotaCfgSnapshot()
 		snap := &AntigravityQuotaSnapshot{
 			AuthID:    auth.ID,
 			FetchedAt: time.Now().UTC(),

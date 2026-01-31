@@ -102,14 +102,12 @@ antigravity-quota:
   enabled: false                 # 是否启用后台轮询（默认关闭）
   poll-interval: 1800            # 轮询间隔，单位秒（默认 30 分钟）
   cache-ttl: 600                 # 缓存 TTL，单位秒（默认 10 分钟）
-  persist-interval: 3600         # 持久化节流间隔，单位秒（默认 1 小时）
   concurrency: 4                 # 并发刷新数量（默认 4）
 ```
 
 **边界值钳制：**
 - `poll-interval`: 10 ~ 86400 秒
-- `cache-ttl`: 10 ~ 86400 秒
-- `persist-interval`: 60 ~ 86400 秒
+- `cache-ttl`: 30 ~ 86400 秒
 - `concurrency`: 1 ~ 32
 
 ---
@@ -242,6 +240,5 @@ antigravity-quota:
   enabled: true          # 启用后台轮询
   poll-interval: 1800    # 每 30 分钟轮询一次
   cache-ttl: 600         # 缓存 10 分钟
-  persist-interval: 3600 # 每小时最多持久化一次
   concurrency: 4         # 并发 4 个请求
 ```

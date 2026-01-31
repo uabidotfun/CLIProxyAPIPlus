@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -361,7 +360,11 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 
 	// 重要：auth 文件的 metadata 变化（例如 quota/token 写回）会触发 watcher 更新。
 	// 但这类变化不应导致 antigravity 重新拉取模型列表，否则会出现写回→触发→重拉模型的循环。
-	if shouldRegisterModels(existing, auth) {
+	shouldRegister := shouldRegisterModels(auth)
+	if !shouldRegister {
+		log.Debugf("skipping model registration for auth %s (provider=%s, hasExisting=%v)", auth.ID, auth.Provider, existing != nil)
+	}
+	if shouldRegister {
 		s.registerModelsForAuth(auth)
 	}
 
@@ -379,107 +382,21 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	}
 }
 
-func shouldRegisterModels(existing, next *coreauth.Auth) bool {
+func shouldRegisterModels(next *coreauth.Auth) bool {
 	// 默认：保持原有行为（即总是注册），仅对 antigravity 做精细化判断以避免副作用。
 	if next == nil {
 		return false
 	}
 	provider := strings.ToLower(strings.TrimSpace(next.Provider))
-	if provider != "antigravity" {
-		return true
-	}
-	if existing == nil {
+
+	// 临时：对 antigravity 也无条件注册，避免模型丢失
+	// TODO: 优化节流逻辑，仅在 quota 写回时跳过
+	if provider == "antigravity" {
+		log.Debugf("shouldRegisterModels: true (antigravity always register, id=%s)", next.ID)
 		return true
 	}
 
-	// 只要影响模型列表/路由的关键字段变化，就需要重新拉取模型。
-	if !strings.EqualFold(strings.TrimSpace(existing.Provider), strings.TrimSpace(next.Provider)) {
-		return true
-	}
-	if strings.TrimSpace(existing.Prefix) != strings.TrimSpace(next.Prefix) {
-		return true
-	}
-	if existing.Disabled != next.Disabled {
-		return true
-	}
-	if resolveAuthBaseURL(existing) != resolveAuthBaseURL(next) {
-		return true
-	}
-
-	// metadata 变化默认不触发重拉，但若是“非 token/quota 相关”的变化，需要保守地重拉一次。
-	// 这样可以兼容未来 metadata 扩展（例如影响模型过滤的开关）。
-	if !metadataChangedOnlyInAllowlist(existing.Metadata, next.Metadata) {
-		return true
-	}
-	return false
-}
-
-func resolveAuthBaseURL(a *coreauth.Auth) string {
-	if a == nil {
-		return ""
-	}
-	if a.Attributes != nil {
-		if v := strings.TrimSpace(a.Attributes["base_url"]); v != "" {
-			return strings.TrimSuffix(v, "/")
-		}
-	}
-	if a.Metadata != nil {
-		if v, ok := a.Metadata["base_url"].(string); ok {
-			v = strings.TrimSpace(v)
-			if v != "" {
-				return strings.TrimSuffix(v, "/")
-			}
-		}
-	}
-	return ""
-}
-
-func metadataChangedOnlyInAllowlist(prev, next map[string]any) bool {
-	// 允许变更的 metadata 键：
-	// - token/过期相关（由 Refresh 或 watcher 更新）
-	// - quota 相关（由 quota manager 写回）
-	allow := func(k string) bool {
-		k = strings.TrimSpace(strings.ToLower(k))
-		switch k {
-		case "access_token", "refresh_token", "expires_in", "timestamp", "expired", "expires_at", "last_refresh":
-			return true
-		case "antigravity_quota", "antigravity_quota_fetched_at", "antigravity_quota_base_url":
-			return true
-		}
-		if strings.HasPrefix(k, "antigravity_quota") {
-			return true
-		}
-		return false
-	}
-
-	// 快路径：两者都空。
-	if len(prev) == 0 && len(next) == 0 {
-		return true
-	}
-
-	// 任何“新增/删除”的 key 只要不在 allowlist，就视为需要重拉。
-	seen := make(map[string]struct{}, len(prev)+len(next))
-	for k := range prev {
-		seen[k] = struct{}{}
-	}
-	for k := range next {
-		seen[k] = struct{}{}
-	}
-	for k := range seen {
-		pv, pok := prev[k]
-		nv, nok := next[k]
-		if !pok || !nok {
-			if !allow(k) {
-				return false
-			}
-			continue
-		}
-		if !reflect.DeepEqual(pv, nv) {
-			if !allow(k) {
-				return false
-			}
-		}
-	}
+	// 其他 provider 无条件注册
 	return true
 }
 

@@ -244,9 +244,7 @@ type AntigravityQuotaConfig struct {
 	PollIntervalSeconds int `yaml:"poll-interval" json:"poll-interval"`
 	// CacheTTLSeconds 为内存快照 TTL（秒）。
 	CacheTTLSeconds int `yaml:"cache-ttl" json:"cache-ttl"`
-	// PersistIntervalSeconds 为写回 auth 文件的最小间隔（秒）。
-	PersistIntervalSeconds int `yaml:"persist-interval" json:"persist-interval"`
-	// Concurrency 为并发刷新数量（目前未启用，保留配置位）。
+	// Concurrency 为并发刷新数量。
 	Concurrency int `yaml:"concurrency" json:"concurrency"`
 }
 
@@ -570,7 +568,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.AntigravityQuota.Enabled = false
 	cfg.AntigravityQuota.PollIntervalSeconds = 1800
 	cfg.AntigravityQuota.CacheTTLSeconds = 600
-	cfg.AntigravityQuota.PersistIntervalSeconds = 3600
 	cfg.AntigravityQuota.Concurrency = 4
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
