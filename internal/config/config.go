@@ -54,6 +54,15 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// UsageStatisticsPersistFile specifies the file path for persisting usage statistics.
+	// When set, statistics are automatically loaded at startup and saved periodically.
+	// Leave empty to disable persistence (statistics will be lost on restart).
+	UsageStatisticsPersistFile string `yaml:"usage-statistics-persist-file" json:"usage-statistics-persist-file"`
+
+	// UsageStatisticsPersistInterval specifies how often (in seconds) to persist usage statistics to file.
+	// Default is 300 (5 minutes). Minimum is 60 seconds.
+	UsageStatisticsPersistInterval int `yaml:"usage-statistics-persist-interval" json:"usage-statistics-persist-interval"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 

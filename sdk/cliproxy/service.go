@@ -17,7 +17,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -183,6 +183,49 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewQwenAuthenticator(),
 	)
+}
+
+// initUsagePersister 初始化 usage 统计持久化
+func (s *Service) initUsagePersister(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+
+	if cfg == nil {
+		return
+	}
+
+	filePath := strings.TrimSpace(cfg.UsageStatisticsPersistFile)
+	if filePath == "" {
+		return
+	}
+
+	// 持久化间隔，默认 5 分钟
+	intervalSec := cfg.UsageStatisticsPersistInterval
+	if intervalSec <= 0 {
+		intervalSec = 300
+	}
+	if intervalSec < 60 {
+		intervalSec = 60
+	}
+	interval := time.Duration(intervalSec) * time.Second
+
+	stats := internalusage.GetRequestStatistics()
+	persister := internalusage.NewPersister(stats, filePath, interval)
+
+	// 加载已有的持久化数据
+	if _, err := persister.Load(); err != nil {
+		log.Warnf("failed to load usage statistics from %s: %v", filePath, err)
+	}
+
+	// 设置全局 persister 并启动定期持久化
+	internalusage.SetGlobalPersister(persister)
+	persister.Start(ctx)
+
+	log.Infof("usage statistics persistence enabled (file=%s, interval=%s)", filePath, interval)
 }
 
 func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
@@ -539,6 +582,9 @@ func (s *Service) Run(ctx context.Context) error {
 
 	usage.StartDefault(ctx)
 
+	// 初始化 usage 统计持久化
+	s.initUsagePersister(ctx)
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 	defer func() {
@@ -800,6 +846,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				}
 			}
 		}
+
+		// 停止 usage 统计持久化
+		internalusage.StopGlobalPersister()
 
 		usage.StopDefault()
 	})

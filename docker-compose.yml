@@ -31,6 +31,7 @@ services:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+      - ${CLI_PROXY_DATA_PATH:-./data}:/CLIProxyAPI/data
       # 挂载 Surge CA 证书用于 MitM 抓包（PEM 格式，Alpine 需要）
       - ./surge-ca.pem:/usr/local/share/ca-certificates/surge-ca.crt:ro
       # 挂载自定义入口脚本（实现系统级 CA 信任）
