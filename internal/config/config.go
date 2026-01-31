@@ -122,6 +122,9 @@ type Config struct {
 	// from your current session. Default: false.
 	IncognitoBrowser bool `yaml:"incognito-browser" json:"incognito-browser"`
 
+	// AntigravityQuota controls periodic quota polling and persistence.
+	AntigravityQuota AntigravityQuotaConfig `yaml:"antigravity-quota" json:"antigravity-quota"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 
@@ -230,6 +233,21 @@ type AmpUpstreamAPIKeyEntry struct {
 
 	// APIKeys are the client API keys (from top-level api-keys) that map to this upstream key.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
+}
+
+// AntigravityQuotaConfig 控制 antigravity 配额查询/缓存/持久化行为。
+//
+// 说明：这些字段目前主要用于管理 API 的按需刷新与未来的后台轮询扩展。
+type AntigravityQuotaConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// PollIntervalSeconds 为后台轮询间隔（秒）。
+	PollIntervalSeconds int `yaml:"poll-interval" json:"poll-interval"`
+	// CacheTTLSeconds 为内存快照 TTL（秒）。
+	CacheTTLSeconds int `yaml:"cache-ttl" json:"cache-ttl"`
+	// PersistIntervalSeconds 为写回 auth 文件的最小间隔（秒）。
+	PersistIntervalSeconds int `yaml:"persist-interval" json:"persist-interval"`
+	// Concurrency 为并发刷新数量（目前未启用，保留配置位）。
+	Concurrency int `yaml:"concurrency" json:"concurrency"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
@@ -549,6 +567,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.IncognitoBrowser = false // Default to normal browser (AWS uses incognito by force)
+	cfg.AntigravityQuota.Enabled = false
+	cfg.AntigravityQuota.PollIntervalSeconds = 1800
+	cfg.AntigravityQuota.CacheTTLSeconds = 600
+	cfg.AntigravityQuota.PersistIntervalSeconds = 3600
+	cfg.AntigravityQuota.Concurrency = 4
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.

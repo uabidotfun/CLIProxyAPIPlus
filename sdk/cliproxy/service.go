@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -87,6 +89,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// antigravityQuota 提供 antigravity 配额查询/缓存能力。
+	antigravityQuota *quota.AntigravityQuotaManager
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -96,6 +101,68 @@ type Service struct {
 //   - plugin: The usage plugin to register
 func (s *Service) RegisterUsagePlugin(plugin usage.Plugin) {
 	usage.RegisterPlugin(plugin)
+}
+
+// GetAntigravityQuota 返回指定 authID 的配额快照（不触发刷新）。
+func (s *Service) GetAntigravityQuota(authID string) (map[string]any, bool) {
+	if s == nil {
+		return nil, false
+	}
+	qm := s.antigravityQuota
+	if qm == nil {
+		return nil, false
+	}
+	snap, okSnap := qm.GetSnapshot(authID)
+	if !okSnap || snap == nil {
+		return nil, false
+	}
+	// 直接返回 Parsed（若 Parsed 为空，调用方可走 management API 获取 Raw）。
+	if snap.Parsed == nil {
+		return nil, false
+	}
+	return snap.Parsed, true
+}
+
+// RefreshAntigravityQuota 刷新指定 authID 的配额快照。
+func (s *Service) RefreshAntigravityQuota(ctx context.Context, authID string, force bool, persist bool) (map[string]any, error) {
+	if s == nil {
+		return nil, fmt.Errorf("service is nil")
+	}
+	qm := s.antigravityQuota
+	if qm == nil {
+		return nil, fmt.Errorf("antigravity quota manager unavailable")
+	}
+	snap, err := qm.RefreshOne(ctx, authID, force, persist)
+	if err != nil {
+		return nil, err
+	}
+	if snap == nil || snap.Parsed == nil {
+		return nil, fmt.Errorf("quota snapshot missing")
+	}
+	return snap.Parsed, nil
+}
+
+// RefreshAllAntigravityQuota 刷新全部 antigravity auth 的配额快照。
+func (s *Service) RefreshAllAntigravityQuota(ctx context.Context, force bool, persist bool) (map[string]map[string]any, error) {
+	if s == nil {
+		return nil, fmt.Errorf("service is nil")
+	}
+	qm := s.antigravityQuota
+	if qm == nil {
+		return nil, fmt.Errorf("antigravity quota manager unavailable")
+	}
+	res, err := qm.RefreshAll(ctx, force, persist)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]map[string]any, len(res))
+	for id, snap := range res {
+		if snap == nil || snap.Parsed == nil {
+			continue
+		}
+		out[id] = snap.Parsed
+	}
+	return out, nil
 }
 
 // GetWatcher returns the underlying WatcherWrapper instance.
@@ -289,8 +356,16 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	}
 	auth = auth.Clone()
 	s.ensureExecutorsForAuth(auth)
-	s.registerModelsForAuth(auth)
-	if existing, ok := s.coreManager.GetByID(auth.ID); ok && existing != nil {
+
+	existing, hasExisting := s.coreManager.GetByID(auth.ID)
+
+	// 重要：auth 文件的 metadata 变化（例如 quota/token 写回）会触发 watcher 更新。
+	// 但这类变化不应导致 antigravity 重新拉取模型列表，否则会出现写回→触发→重拉模型的循环。
+	if shouldRegisterModels(existing, auth) {
+		s.registerModelsForAuth(auth)
+	}
+
+	if hasExisting && existing != nil {
 		auth.CreatedAt = existing.CreatedAt
 		auth.LastRefreshedAt = existing.LastRefreshedAt
 		auth.NextRefreshAfter = existing.NextRefreshAfter
@@ -302,6 +377,110 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	if _, err := s.coreManager.Register(ctx, auth); err != nil {
 		log.Errorf("failed to register auth %s: %v", auth.ID, err)
 	}
+}
+
+func shouldRegisterModels(existing, next *coreauth.Auth) bool {
+	// 默认：保持原有行为（即总是注册），仅对 antigravity 做精细化判断以避免副作用。
+	if next == nil {
+		return false
+	}
+	provider := strings.ToLower(strings.TrimSpace(next.Provider))
+	if provider != "antigravity" {
+		return true
+	}
+	if existing == nil {
+		return true
+	}
+
+	// 只要影响模型列表/路由的关键字段变化，就需要重新拉取模型。
+	if !strings.EqualFold(strings.TrimSpace(existing.Provider), strings.TrimSpace(next.Provider)) {
+		return true
+	}
+	if strings.TrimSpace(existing.Prefix) != strings.TrimSpace(next.Prefix) {
+		return true
+	}
+	if existing.Disabled != next.Disabled {
+		return true
+	}
+	if resolveAuthBaseURL(existing) != resolveAuthBaseURL(next) {
+		return true
+	}
+
+	// metadata 变化默认不触发重拉，但若是“非 token/quota 相关”的变化，需要保守地重拉一次。
+	// 这样可以兼容未来 metadata 扩展（例如影响模型过滤的开关）。
+	if !metadataChangedOnlyInAllowlist(existing.Metadata, next.Metadata) {
+		return true
+	}
+	return false
+}
+
+func resolveAuthBaseURL(a *coreauth.Auth) string {
+	if a == nil {
+		return ""
+	}
+	if a.Attributes != nil {
+		if v := strings.TrimSpace(a.Attributes["base_url"]); v != "" {
+			return strings.TrimSuffix(v, "/")
+		}
+	}
+	if a.Metadata != nil {
+		if v, ok := a.Metadata["base_url"].(string); ok {
+			v = strings.TrimSpace(v)
+			if v != "" {
+				return strings.TrimSuffix(v, "/")
+			}
+		}
+	}
+	return ""
+}
+
+func metadataChangedOnlyInAllowlist(prev, next map[string]any) bool {
+	// 允许变更的 metadata 键：
+	// - token/过期相关（由 Refresh 或 watcher 更新）
+	// - quota 相关（由 quota manager 写回）
+	allow := func(k string) bool {
+		k = strings.TrimSpace(strings.ToLower(k))
+		switch k {
+		case "access_token", "refresh_token", "expires_in", "timestamp", "expired", "expires_at", "last_refresh":
+			return true
+		case "antigravity_quota", "antigravity_quota_fetched_at", "antigravity_quota_base_url":
+			return true
+		}
+		if strings.HasPrefix(k, "antigravity_quota") {
+			return true
+		}
+		return false
+	}
+
+	// 快路径：两者都空。
+	if len(prev) == 0 && len(next) == 0 {
+		return true
+	}
+
+	// 任何“新增/删除”的 key 只要不在 allowlist，就视为需要重拉。
+	seen := make(map[string]struct{}, len(prev)+len(next))
+	for k := range prev {
+		seen[k] = struct{}{}
+	}
+	for k := range next {
+		seen[k] = struct{}{}
+	}
+	for k := range seen {
+		pv, pok := prev[k]
+		nv, nok := next[k]
+		if !pok || !nok {
+			if !allow(k) {
+				return false
+			}
+			continue
+		}
+		if !reflect.DeepEqual(pv, nv) {
+			if !allow(k) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
@@ -454,6 +633,15 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}
 
+	// 初始化 Antigravity 配额管理器（全局单例 + Service 内引用）。
+	// 说明：此处仅初始化与提供手动刷新能力；定期轮询与配置项会在后续步骤接入。
+	if s.coreManager != nil {
+		qm := quota.NewAntigravityQuotaManager(s.cfg, s.coreManager)
+		qm.Start()
+		quota.SetGlobalAntigravityQuotaManager(qm)
+		s.antigravityQuota = qm
+	}
+
 	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return err
@@ -573,6 +761,10 @@ func (s *Service) Run(ctx context.Context) error {
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
 		}
 		s.rebindExecutors()
+		// 热更新 antigravity quota manager 配置。
+		if s.antigravityQuota != nil {
+			s.antigravityQuota.UpdateConfig(newCfg)
+		}
 	}
 
 	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
@@ -647,6 +839,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
+		}
+		if s.antigravityQuota != nil {
+			s.antigravityQuota.Stop()
 		}
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {

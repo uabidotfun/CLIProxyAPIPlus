@@ -24,6 +24,7 @@ static/*
 
 # Authentication data
 auths/*
+auths.zip
 !auths/.gitkeep
 
 # Documentation
@@ -51,3 +52,5 @@ _bmad-output/*
 .DS_Store
 ._*
 *.bak
+*.pem
+*.cer

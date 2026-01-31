@@ -1,7 +1,8 @@
 services:
   cli-proxy-api:
     image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api-plus:latest}
-    pull_policy: always
+    platform: linux/arm64  # 指定平台为 ARM64，适配 Apple Silicon 或 ARM 服务器
+    # pull_policy: always  # 注释掉以优先使用本地构建
     build:
       context: .
       dockerfile: Dockerfile
@@ -14,8 +15,13 @@ services:
     #   - .env
     environment:
       DEPLOY: ${DEPLOY:-}
+      # 让 Node.js 应用信任 Surge CA 证书（用于 MitM 抓包）
+      NODE_EXTRA_CA_CERTS: /usr/local/share/ca-certificates/surge-ca.crt
+      # 如果需要代理，取消下面的注释
+      HTTP_PROXY: http://host.docker.internal:6152
+      HTTPS_PROXY: http://host.docker.internal:6152
     ports:
-      - "8317:8317"
+      - "8045:8045"  # 与 config.yaml 中的 port: 8045 保持一致
       - "8085:8085"
       - "1455:1455"
       - "54545:54545"
@@ -25,4 +31,10 @@ services:
       - ${CLI_PROXY_CONFIG_PATH:-./config.yaml}:/CLIProxyAPI/config.yaml
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
+      # 挂载 Surge CA 证书用于 MitM 抓包（PEM 格式，Alpine 需要）
+      - ./surge-ca.pem:/usr/local/share/ca-certificates/surge-ca.crt:ro
+      # 挂载自定义入口脚本（实现系统级 CA 信任）
+      - ./entrypoint.sh:/CLIProxyAPI/entrypoint.sh:ro
+    # 使用自定义入口脚本，在启动应用前更新系统 CA 证书存储
+    entrypoint: ["/bin/sh", "/CLIProxyAPI/entrypoint.sh"]
     restart: unless-stopped
