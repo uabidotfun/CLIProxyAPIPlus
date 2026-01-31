@@ -108,6 +108,15 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		// 从 metadata 恢复 ModelStates（配额阈值等模型级别状态）
+		if modelStatesRaw, ok := metadata["model_states"]; ok && modelStatesRaw != nil {
+			if msBytes, err := json.Marshal(modelStatesRaw); err == nil {
+				var ms map[string]*coreauth.ModelState
+				if err := json.Unmarshal(msBytes, &ms); err == nil {
+					a.ModelStates = ms
+				}
+			}
+		}
 		ApplyAuthExcludedModelsMeta(a, cfg, nil, "oauth")
 		if provider == "gemini-cli" {
 			if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {

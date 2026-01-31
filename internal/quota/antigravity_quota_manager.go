@@ -112,7 +112,7 @@ func (m *AntigravityQuotaManager) Start() {
 	if m == nil {
 		return
 	}
-	enabled, _, _, _ := m.quotaCfgSnapshot()
+	enabled, _, _, _, _ := m.quotaCfgSnapshot()
 	if !enabled {
 		return
 	}
@@ -133,7 +133,7 @@ func (m *AntigravityQuotaManager) startPolling() {
 		m.pollCancel = nil
 	}
 
-	enabled, pollInterval, _, _ := m.quotaCfgSnapshot()
+	enabled, pollInterval, _, _, _ := m.quotaCfgSnapshot()
 	if !enabled || pollInterval <= 0 {
 		return
 	}
@@ -189,9 +189,9 @@ func (m *AntigravityQuotaManager) pollOnce(ctx context.Context) {
 }
 
 // quotaCfgSnapshot 返回当前配置（带默认值回退和边界钳制）。
-func (m *AntigravityQuotaManager) quotaCfgSnapshot() (enabled bool, pollInterval, cacheTTL time.Duration, concurrency int) {
+func (m *AntigravityQuotaManager) quotaCfgSnapshot() (enabled bool, pollInterval, cacheTTL time.Duration, concurrency int, claudeThreshold float64) {
 	if m == nil {
-		return false, 30 * time.Minute, 10 * time.Minute, 4
+		return false, 30 * time.Minute, 10 * time.Minute, 4, 0
 	}
 	m.cfgMu.RLock()
 	cfg := m.cfg
@@ -202,6 +202,7 @@ func (m *AntigravityQuotaManager) quotaCfgSnapshot() (enabled bool, pollInterval
 	pollInterval = 30 * time.Minute
 	cacheTTL = 10 * time.Minute
 	concurrency = 4
+	claudeThreshold = 0
 
 	if cfg == nil {
 		return
@@ -235,21 +236,31 @@ func (m *AntigravityQuotaManager) quotaCfgSnapshot() (enabled bool, pollInterval
 	if concurrency > 32 {
 		concurrency = 32
 	}
+
+	// Claude 配额阈值：0-1 之间。
+	claudeThreshold = qc.ClaudeQuotaThreshold
+	if claudeThreshold < 0 {
+		claudeThreshold = 0
+	}
+	if claudeThreshold > 1 {
+		claudeThreshold = 1
+	}
 	return
 }
 
 // UpdateConfig 热更新配置。根据 enabled/pollInterval 变化启动/停止/重启轮询。
+// 当 claude-quota-threshold 变化时，触发一次立即轮询以应用新阈值。
 func (m *AntigravityQuotaManager) UpdateConfig(cfg *config.Config) {
 	if m == nil {
 		return
 	}
-	oldEnabled, oldPoll, _, _ := m.quotaCfgSnapshot()
+	oldEnabled, oldPoll, _, _, oldClaudeThreshold := m.quotaCfgSnapshot()
 
 	m.cfgMu.Lock()
 	m.cfg = cfg
 	m.cfgMu.Unlock()
 
-	newEnabled, newPoll, _, _ := m.quotaCfgSnapshot()
+	newEnabled, newPoll, _, _, newClaudeThreshold := m.quotaCfgSnapshot()
 
 	// enabled 变化。
 	if !oldEnabled && newEnabled {
@@ -260,6 +271,16 @@ func (m *AntigravityQuotaManager) UpdateConfig(cfg *config.Config) {
 		// poll-interval 变化，重启 ticker。
 		m.stopPolling()
 		m.startPolling()
+	}
+
+	// claude-quota-threshold 变化时，触发一次立即轮询以应用新阈值。
+	// 使用 force=true 忽略缓存，确保重新执行阈值检查。
+	if newEnabled && oldClaudeThreshold != newClaudeThreshold {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_, _ = m.RefreshAll(ctx, true, true)
+		}()
 	}
 }
 
@@ -346,7 +367,7 @@ func (m *AntigravityQuotaManager) RefreshAll(ctx context.Context, force bool, pe
 	}
 
 	// 读取并发数配置。
-	_, _, _, concurrency := m.quotaCfgSnapshot()
+	_, _, _, concurrency, _ := m.quotaCfgSnapshot()
 	if concurrency < 1 {
 		concurrency = 1
 	}
@@ -430,6 +451,9 @@ func (m *AntigravityQuotaManager) RefreshOne(ctx context.Context, authID string,
 		}
 	}
 
+	// 配额阈值检查：检查 Claude 模型配额是否低于阈值，并更新 ModelState。
+	m.applyClaudeQuotaThreshold(ctx, auth, snap)
+
 	m.mu.Lock()
 	m.snapshots[authID] = snap
 	m.mu.Unlock()
@@ -492,6 +516,159 @@ func (m *AntigravityQuotaManager) persistSnapshot(ctx context.Context, auth *cor
 	m.lastPersistHash[id] = snap.RawSHA256
 	m.persistMu.Unlock()
 	return nil
+}
+
+// applyClaudeQuotaThreshold 检查 Claude 模型配额是否低于阈值，并更新 ModelState。
+// 若配额低于阈值（或无 remainingFraction），标记 QuotaThresholdExceeded = true。
+func (m *AntigravityQuotaManager) applyClaudeQuotaThreshold(ctx context.Context, auth *coreauth.Auth, snap *AntigravityQuotaSnapshot) {
+	if m == nil || m.coreManager == nil || auth == nil || snap == nil {
+		return
+	}
+
+	_, _, _, _, threshold := m.quotaCfgSnapshot()
+	// 阈值为 0 表示不启用此功能（除非模型完全没有 remainingFraction）
+	// 这里我们统一处理：检查是否有模型需要标记
+
+	parsed := snap.Parsed
+	if parsed == nil {
+		return
+	}
+	modelsRaw, ok := parsed["models"]
+	if !ok || modelsRaw == nil {
+		return
+	}
+	models, ok := modelsRaw.(map[string]any)
+	if !ok {
+		return
+	}
+
+	// 构建 alias 映射：原始名称 -> []alias
+	aliasMap := make(map[string][]string)
+	m.cfgMu.RLock()
+	cfg := m.cfg
+	m.cfgMu.RUnlock()
+	if cfg != nil && cfg.OAuthModelAlias != nil {
+		if antigravityAliases, ok := cfg.OAuthModelAlias["antigravity"]; ok {
+			for _, entry := range antigravityAliases {
+				if entry.Name != "" && entry.Alias != "" {
+					aliasMap[entry.Name] = append(aliasMap[entry.Name], entry.Alias)
+				}
+			}
+		}
+	}
+
+	updated := auth.Clone()
+	if updated.ModelStates == nil {
+		updated.ModelStates = make(map[string]*coreauth.ModelState)
+	}
+
+	now := time.Now()
+	changed := false
+
+	for modelID, modelData := range models {
+		modelMap, ok := modelData.(map[string]any)
+		if !ok {
+			continue
+		}
+
+		// 只处理 Claude 模型（modelProvider == MODEL_PROVIDER_ANTHROPIC 或 modelID 包含 "claude"）
+		isClaude := false
+		if provider, ok := modelMap["modelProvider"].(string); ok {
+			isClaude = strings.EqualFold(provider, "MODEL_PROVIDER_ANTHROPIC")
+		}
+		if !isClaude && strings.Contains(strings.ToLower(modelID), "claude") {
+			isClaude = true
+		}
+		if !isClaude {
+			continue
+		}
+
+		// 检查 quotaInfo
+		quotaInfo, ok := modelMap["quotaInfo"].(map[string]any)
+		if !ok {
+			continue
+		}
+
+		// 获取 remainingFraction
+		remainingFraction := float64(-1) // -1 表示不存在
+		if rf, ok := quotaInfo["remainingFraction"]; ok {
+			switch v := rf.(type) {
+			case float64:
+				remainingFraction = v
+			case int:
+				remainingFraction = float64(v)
+			case json.Number:
+				if f, err := v.Float64(); err == nil {
+					remainingFraction = f
+				}
+			}
+		}
+
+		// 获取 resetTime
+		var resetTime time.Time
+		if rt, ok := quotaInfo["resetTime"].(string); ok && rt != "" {
+			if t, err := time.Parse(time.RFC3339, rt); err == nil {
+				resetTime = t
+			}
+		}
+
+		// 判断是否应标记为配额阈值超限
+		shouldBlock := false
+		if remainingFraction < 0 {
+			// 无 remainingFraction 字段，说明配额已耗尽
+			shouldBlock = true
+		} else if threshold > 0 && remainingFraction <= threshold {
+			// 配额低于阈值
+			shouldBlock = true
+		}
+
+		// 收集需要更新的模型 ID（原始名 + 所有 alias）
+		modelIDs := []string{modelID}
+		if aliases, ok := aliasMap[modelID]; ok {
+			modelIDs = append(modelIDs, aliases...)
+		}
+
+		// 更新 ModelState（为原始名和所有 alias 都设置相同状态）
+		for _, mid := range modelIDs {
+			state := updated.ModelStates[mid]
+			if state == nil {
+				state = &coreauth.ModelState{}
+				updated.ModelStates[mid] = state
+			}
+
+			if shouldBlock != state.QuotaThresholdExceeded {
+				state.QuotaThresholdExceeded = shouldBlock
+				state.UpdatedAt = now
+				if shouldBlock {
+					state.StatusMessage = "quota below threshold"
+					if !resetTime.IsZero() {
+						state.NextRetryAfter = resetTime
+						state.Quota.NextRecoverAt = resetTime
+					}
+					log.Infof("antigravity quota: model %s marked as quota_threshold_exceeded (remaining=%.2f, threshold=%.2f)", mid, remainingFraction, threshold)
+				} else {
+					state.StatusMessage = ""
+					state.NextRetryAfter = time.Time{}
+					state.Quota.NextRecoverAt = time.Time{}
+					log.Infof("antigravity quota: model %s cleared quota_threshold_exceeded", mid)
+				}
+				changed = true
+			}
+		}
+	}
+
+	if changed {
+		updated.UpdatedAt = now
+		// 将 ModelStates 序列化到 Metadata 以便持久化到 auth 文件
+		// （FileTokenStore 只序列化 Metadata，不序列化整个 Auth 结构）
+		if updated.Metadata == nil {
+			updated.Metadata = make(map[string]any)
+		}
+		if len(updated.ModelStates) > 0 {
+			updated.Metadata["model_states"] = updated.ModelStates
+		}
+		_, _ = m.coreManager.Update(ctx, updated)
+	}
 }
 
 func (m *AntigravityQuotaManager) fetchAvailableModels(ctx context.Context, auth *coreauth.Auth) (*AntigravityQuotaSnapshot, error) {
@@ -609,7 +786,7 @@ func (m *AntigravityQuotaManager) fetchAvailableModels(ctx context.Context, auth
 		}
 		sum := sha256.Sum256(raw)
 		// 使用配置中的 cache-ttl。
-		_, _, cacheTTL, _ := m.quotaCfgSnapshot()
+		_, _, cacheTTL, _, _ := m.quotaCfgSnapshot()
 		snap := &AntigravityQuotaSnapshot{
 			AuthID:    auth.ID,
 			FetchedAt: time.Now().UTC(),

@@ -85,6 +85,8 @@ type ModelState struct {
 	StatusMessage string `json:"status_message,omitempty"`
 	// Unavailable mirrors whether the model is temporarily blocked for retries.
 	Unavailable bool `json:"unavailable"`
+	// QuotaThresholdExceeded indicates the model is blocked due to quota falling below configured threshold.
+	QuotaThresholdExceeded bool `json:"quota_threshold_exceeded,omitempty"`
 	// NextRetryAfter defines the per-model retry time.
 	NextRetryAfter time.Time `json:"next_retry_after"`
 	// LastError records the latest error observed for this model.

@@ -356,6 +356,15 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	auth = auth.Clone()
 	s.ensureExecutorsForAuth(auth)
 
+	// 调试：检查 ModelStates 是否从文件正确加载
+	if len(auth.ModelStates) > 0 {
+		for model, state := range auth.ModelStates {
+			if state != nil && state.QuotaThresholdExceeded {
+				log.Debugf("applyCoreAuthAddOrUpdate: auth=%s model=%s QuotaThresholdExceeded=%v", auth.ID, model, state.QuotaThresholdExceeded)
+			}
+		}
+	}
+
 	existing, hasExisting := s.coreManager.GetByID(auth.ID)
 
 	// 重要：auth 文件的 metadata 变化（例如 quota/token 写回）会触发 watcher 更新。

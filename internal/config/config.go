@@ -246,6 +246,9 @@ type AntigravityQuotaConfig struct {
 	CacheTTLSeconds int `yaml:"cache-ttl" json:"cache-ttl"`
 	// Concurrency 为并发刷新数量。
 	Concurrency int `yaml:"concurrency" json:"concurrency"`
+	// ClaudeQuotaThreshold 当 Claude 模型剩余配额低于此阈值时标记模型不可用（0-1，如 0.2 表示 20%）。
+	// 默认为 0，表示只在配额完全耗尽（无 remainingFraction）时标记。
+	ClaudeQuotaThreshold float64 `yaml:"claude-quota-threshold" json:"claude-quota-threshold"`
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.

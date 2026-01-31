@@ -78,7 +78,7 @@ func TestQuotaCfgSnapshot_Defaults(t *testing.T) {
 	mgr := coreauth.NewManager(store, nil, nil)
 	qm := NewAntigravityQuotaManager(cfg, mgr)
 
-	enabled, pollInterval, cacheTTL, concurrency := qm.quotaCfgSnapshot()
+	enabled, pollInterval, cacheTTL, concurrency, _ := qm.quotaCfgSnapshot()
 
 	if enabled {
 		t.Error("expected enabled=false by default")
@@ -108,7 +108,7 @@ func TestQuotaCfgSnapshot_CustomValues(t *testing.T) {
 	mgr := coreauth.NewManager(store, nil, nil)
 	qm := NewAntigravityQuotaManager(cfg, mgr)
 
-	enabled, pollInterval, cacheTTL, concurrency := qm.quotaCfgSnapshot()
+	enabled, pollInterval, cacheTTL, concurrency, _ := qm.quotaCfgSnapshot()
 
 	if !enabled {
 		t.Error("expected enabled=true")
@@ -141,7 +141,7 @@ func TestQuotaCfgSnapshot_Clamping(t *testing.T) {
 	mgr := coreauth.NewManager(store, nil, nil)
 	qm := NewAntigravityQuotaManager(cfg, mgr)
 
-	_, pollInterval, cacheTTL, concurrency := qm.quotaCfgSnapshot()
+	_, pollInterval, cacheTTL, concurrency, _ := qm.quotaCfgSnapshot()
 
 	if pollInterval != 10*time.Second {
 		t.Errorf("expected pollInterval clamped to 10s, got %v", pollInterval)
@@ -900,7 +900,7 @@ func TestQuotaCfgSnapshot_NilConfig(t *testing.T) {
 	mgr := coreauth.NewManager(store, nil, nil)
 	qm := NewAntigravityQuotaManager(nil, mgr)
 
-	enabled, pollInterval, cacheTTL, concurrency := qm.quotaCfgSnapshot()
+	enabled, pollInterval, cacheTTL, concurrency, _ := qm.quotaCfgSnapshot()
 
 	if enabled {
 		t.Error("expected enabled=false with nil config")
@@ -1004,5 +1004,180 @@ func TestRefreshAll_PartialFailureContinues(t *testing.T) {
 		}
 	} else {
 		t.Error("expected fail-auth in results")
+	}
+}
+
+// TestApplyClaudeQuotaThreshold_BlocksWhenBelowThreshold 测试配额阈值检查。
+func TestApplyClaudeQuotaThreshold_BlocksWhenBelowThreshold(t *testing.T) {
+	// 模拟返回 Claude 模型配额数据
+	quotaResponse := map[string]any{
+		"models": map[string]any{
+			"claude-sonnet-4-5": map[string]any{
+				"modelProvider": "MODEL_PROVIDER_ANTHROPIC",
+				"quotaInfo": map[string]any{
+					"remainingFraction": 0.1, // 10% 剩余
+					"resetTime":         "2026-01-31T10:00:00Z",
+				},
+			},
+			"claude-opus-4-5": map[string]any{
+				"modelProvider": "MODEL_PROVIDER_ANTHROPIC",
+				"quotaInfo": map[string]any{
+					// 无 remainingFraction，配额耗尽
+					"resetTime": "2026-01-31T10:00:00Z",
+				},
+			},
+			"gemini-2.5-pro": map[string]any{
+				"modelProvider": "MODEL_PROVIDER_GOOGLE",
+				"quotaInfo": map[string]any{
+					"remainingFraction": 1.0,
+				},
+			},
+		},
+	}
+	respBody, _ := json.Marshal(quotaResponse)
+
+	server := mockQuotaServer(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(respBody)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		AntigravityQuota: config.AntigravityQuotaConfig{
+			Enabled:              false,
+			CacheTTLSeconds:      600,
+			ClaudeQuotaThreshold: 0.2, // 阈值 20%
+		},
+	}
+	store := newMemoryAuthStore()
+	auth := &coreauth.Auth{
+		ID:       "test-auth",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"base_url":     server.URL,
+			"access_token": "test-token",
+			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	store.Add(auth)
+
+	mgr := coreauth.NewManager(store, nil, nil)
+	_ = mgr.Load(context.Background())
+
+	qm := NewAntigravityQuotaManager(cfg, mgr)
+
+	ctx := context.Background()
+	_, err := qm.RefreshOne(ctx, "test-auth", true, false)
+	if err != nil {
+		t.Fatalf("RefreshOne failed: %v", err)
+	}
+
+	// 获取更新后的 auth
+	updatedAuth, ok := mgr.GetByID("test-auth")
+	if !ok {
+		t.Fatal("expected auth to exist")
+	}
+
+	// claude-sonnet-4-5: remainingFraction=0.1 < threshold=0.2，应被阻止
+	if state, ok := updatedAuth.ModelStates["claude-sonnet-4-5"]; ok {
+		if !state.QuotaThresholdExceeded {
+			t.Error("claude-sonnet-4-5 should be marked as QuotaThresholdExceeded")
+		}
+	} else {
+		t.Error("expected ModelState for claude-sonnet-4-5")
+	}
+
+	// claude-opus-4-5: 无 remainingFraction，应被阻止
+	if state, ok := updatedAuth.ModelStates["claude-opus-4-5"]; ok {
+		if !state.QuotaThresholdExceeded {
+			t.Error("claude-opus-4-5 should be marked as QuotaThresholdExceeded")
+		}
+	} else {
+		t.Error("expected ModelState for claude-opus-4-5")
+	}
+
+	// gemini-2.5-pro: 非 Claude 模型，不应受影响
+	if state, ok := updatedAuth.ModelStates["gemini-2.5-pro"]; ok {
+		if state.QuotaThresholdExceeded {
+			t.Error("gemini-2.5-pro should NOT be marked as QuotaThresholdExceeded")
+		}
+	}
+}
+
+// TestApplyClaudeQuotaThreshold_ClearsWhenAboveThreshold 测试配额恢复后清除标记。
+func TestApplyClaudeQuotaThreshold_ClearsWhenAboveThreshold(t *testing.T) {
+	callCount := 0
+	server := mockQuotaServer(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Header().Set("Content-Type", "application/json")
+		var resp map[string]any
+		if callCount == 1 {
+			// 第一次：配额不足
+			resp = map[string]any{
+				"models": map[string]any{
+					"claude-sonnet-4-5": map[string]any{
+						"modelProvider": "MODEL_PROVIDER_ANTHROPIC",
+						"quotaInfo": map[string]any{
+							"remainingFraction": 0.05,
+							"resetTime":         "2026-01-31T10:00:00Z",
+						},
+					},
+				},
+			}
+		} else {
+			// 第二次：配额恢复
+			resp = map[string]any{
+				"models": map[string]any{
+					"claude-sonnet-4-5": map[string]any{
+						"modelProvider": "MODEL_PROVIDER_ANTHROPIC",
+						"quotaInfo": map[string]any{
+							"remainingFraction": 0.8,
+							"resetTime":         "2026-01-31T12:00:00Z",
+						},
+					},
+				},
+			}
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+	defer server.Close()
+
+	cfg := &config.Config{
+		AntigravityQuota: config.AntigravityQuotaConfig{
+			Enabled:              false,
+			CacheTTLSeconds:      1, // 短 TTL
+			ClaudeQuotaThreshold: 0.2,
+		},
+	}
+	store := newMemoryAuthStore()
+	auth := &coreauth.Auth{
+		ID:       "test-auth",
+		Provider: "antigravity",
+		Metadata: map[string]any{
+			"base_url":     server.URL,
+			"access_token": "test-token",
+			"expired":      time.Now().Add(1 * time.Hour).Format(time.RFC3339),
+		},
+	}
+	store.Add(auth)
+
+	mgr := coreauth.NewManager(store, nil, nil)
+	_ = mgr.Load(context.Background())
+
+	qm := NewAntigravityQuotaManager(cfg, mgr)
+	ctx := context.Background()
+
+	// 第一次刷新：应被阻止
+	_, _ = qm.RefreshOne(ctx, "test-auth", true, false)
+	auth1, _ := mgr.GetByID("test-auth")
+	if state, ok := auth1.ModelStates["claude-sonnet-4-5"]; !ok || !state.QuotaThresholdExceeded {
+		t.Error("first refresh should mark claude-sonnet-4-5 as QuotaThresholdExceeded")
+	}
+
+	// 第二次刷新：配额恢复，应清除标记
+	_, _ = qm.RefreshOne(ctx, "test-auth", true, false)
+	auth2, _ := mgr.GetByID("test-auth")
+	if state, ok := auth2.ModelStates["claude-sonnet-4-5"]; ok && state.QuotaThresholdExceeded {
+		t.Error("second refresh should clear QuotaThresholdExceeded for claude-sonnet-4-5")
 	}
 }

@@ -246,6 +246,23 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
+
+	// 从 Metadata 恢复 ModelStates（用于配额阈值等模型级别状态）
+	if modelStatesRaw, ok := metadata["model_states"]; ok && modelStatesRaw != nil {
+		// 尝试直接类型断言
+		if ms, ok := modelStatesRaw.(map[string]*cliproxyauth.ModelState); ok {
+			auth.ModelStates = ms
+		} else {
+			// 如果类型不匹配，尝试通过 JSON 重新序列化
+			if msBytes, err := json.Marshal(modelStatesRaw); err == nil {
+				var ms map[string]*cliproxyauth.ModelState
+				if err := json.Unmarshal(msBytes, &ms); err == nil {
+					auth.ModelStates = ms
+				}
+			}
+		}
+	}
+
 	return auth, nil
 }
 

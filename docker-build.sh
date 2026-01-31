@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 #
-# docker-build.sh - Docker 构建与启动脚本（交互式）
+# docker-build.sh - Docker 构建与启动脚本（开发者模式）
 #
-# 这个脚本做两件事：
-# 1) 直接用远端预构建镜像启动（不构建本地镜像）
-# 2) 从源码构建本地镜像并启动（开发者模式）
+# 从源码构建本地镜像并启动，自动备份并恢复 usage 统计数据。
 #
-# 可选隐藏功能：在“重建镜像/重建容器”前后，自动备份并恢复 usage 统计数据。
 # 用法：
-#   ./docker-build.sh --with-usage
+#   ./docker-build.sh              # 默认启用 usage 备份恢复
+#   ./docker-build.sh --no-usage   # 禁用 usage 备份恢复
 #
 # 工作原理：
-# - 第一次使用 --with-usage 会要求输入 Management API key，并写入 temp/stats/.api_secret
+# - 首次运行会要求输入 Management API key，并写入 temp/stats/.api_secret
 # - 重建前调用 /v0/management/usage/export 导出 usage 到 temp/stats/.usage_backup.json
 # - 重建后调用 /v0/management/usage/import 再导回去
 #
@@ -25,7 +23,7 @@ set -euo pipefail
 STATS_DIR="temp/stats"
 STATS_FILE="${STATS_DIR}/.usage_backup.json"
 SECRET_FILE="${STATS_DIR}/.api_secret"
-WITH_USAGE=false
+WITH_USAGE=true
 
 # 从 config.yaml 提取端口号（用于拼接 Management API 的访问地址）
 get_port() {
@@ -140,84 +138,49 @@ wait_for_service() {
   sleep 2
 }
 
-# --- 参数解析：是否启用 --with-usage ---
-if [[ "${1:-}" == "--with-usage" ]]; then
-  WITH_USAGE=true
+# --- 参数解析：--no-usage 禁用 usage 备份恢复 ---
+if [[ "${1:-}" == "--no-usage" ]]; then
+  WITH_USAGE=false
+else
   export_stats_api_secret
 fi
 
-# --- Step 1: 选择运行模式 ---
-echo "请选择一个选项："
-echo "1) 使用远端预构建镜像运行（推荐）"
-echo "2) 从源码构建并运行（开发者模式）"
-read -r -p "请输入选择 [1-2]: " choice
+# --- 从源码构建并运行 ---
+echo "--- 从源码构建并运行 ---"
 
-# --- Step 2: 根据选择执行 ---
-case "$choice" in
-  1)
-    echo "--- 使用预构建镜像运行 ---"
+# 生成版本信息（注入到 Docker build 的 ARG）
+VERSION="$(git describe --tags --always --dirty)"
+COMMIT="$(git rev-parse --short HEAD)"
+BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-    # 如果要 see usage，必须在重建/启动之前先导出
-    if [[ "${WITH_USAGE}" == "true" ]]; then
-      export_stats
-    fi
+echo "本次构建信息："
+echo "  Version: ${VERSION}"
+echo "  Commit: ${COMMIT}"
+echo "  Build Date: ${BUILD_DATE}"
+echo "----------------------------------------"
 
-    # --no-build：只拉取/使用已有镜像，不执行 compose build
-    docker compose up -d --remove-orphans --no-build
+# 用一个本地镜像名覆盖 compose 文件默认的远端镜像名，防止误拉远端镜像
+export CLI_PROXY_IMAGE="cli-proxy-api:local"
 
-    # 重启后等服务 ready，再导回 usage
-    if [[ "${WITH_USAGE}" == "true" ]]; then
-      wait_for_service
-      import_stats
-    fi
+echo "正在构建 Docker 镜像..."
+docker compose build \
+  --build-arg VERSION="${VERSION}" \
+  --build-arg COMMIT="${COMMIT}" \
+  --build-arg BUILD_DATE="${BUILD_DATE}"
 
-    echo "服务已启动（使用远端镜像）。"
-    echo "可运行 'docker compose logs -f' 查看日志。"
-    ;;
+# 如果要保留 usage，构建完成后、重建容器前导出
+if [[ "${WITH_USAGE}" == "true" ]]; then
+  export_stats
+fi
 
-  2)
-    echo "--- 从源码构建并运行 ---"
+echo "正在启动服务..."
+# --pull never：不从远端拉取，强制使用本地刚 build 出来的镜像
+docker compose up -d --remove-orphans --pull never
 
-    # 生成版本信息（注入到 Docker build 的 ARG）
-    VERSION="$(git describe --tags --always --dirty)"
-    COMMIT="$(git rev-parse --short HEAD)"
-    BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if [[ "${WITH_USAGE}" == "true" ]]; then
+  wait_for_service
+  import_stats
+fi
 
-    echo "本次构建信息："
-    echo "  Version: ${VERSION}"
-    echo "  Commit: ${COMMIT}"
-    echo "  Build Date: ${BUILD_DATE}"
-    echo "----------------------------------------"
-
-    # 用一个本地镜像名覆盖 compose 文件默认的远端镜像名，防止误拉远端镜像
-    export CLI_PROXY_IMAGE="cli-proxy-api:local"
-
-    echo "正在构建 Docker 镜像..."
-    docker compose build \
-      --build-arg VERSION="${VERSION}" \
-      --build-arg COMMIT="${COMMIT}" \
-      --build-arg BUILD_DATE="${BUILD_DATE}"
-
-    # 如果要保留 usage，构建完成后、重建容器前导出
-    if [[ "${WITH_USAGE}" == "true" ]]; then
-      export_stats
-    fi
-
-    echo "正在启动服务..."
-    # --pull never：不从远端拉取，强制使用本地刚 build 出来的镜像
-    docker compose up -d --remove-orphans --pull never
-
-    if [[ "${WITH_USAGE}" == "true" ]]; then
-      wait_for_service
-      import_stats
-    fi
-
-    echo "构建完成，服务已启动（使用本地镜像）。"
-    echo "可运行 'docker compose logs -f' 查看日志。"
-    ;;
-
-  *)
-    echo "无效选择，请输入 1 或 2。"
-    exit 1
-    ;;
-esac
+echo "构建完成，服务已启动（使用本地镜像）。"
+echo "可运行 'docker compose logs -f' 查看日志。"

@@ -85,6 +85,7 @@ routing:
 #   poll-interval: 1800      # seconds
 #   cache-ttl: 600           # seconds
 #   concurrency: 4
+#   claude-quota-threshold: 0  # Block Claude models when remaining quota < threshold (0-1, e.g., 0.2 = 20%)
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false

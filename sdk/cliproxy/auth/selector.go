@@ -13,6 +13,7 @@ import (
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	log "github.com/sirupsen/logrus"
 )
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
@@ -226,6 +227,15 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 			if state, ok := auth.ModelStates[model]; ok && state != nil {
 				if state.Status == StatusDisabled {
 					return true, blockReasonDisabled, time.Time{}
+				}
+				// 配额阈值检查：若模型因配额低于阈值被标记，则阻止使用
+				if state.QuotaThresholdExceeded {
+					next := state.NextRetryAfter
+					if next.IsZero() {
+						next = state.Quota.NextRecoverAt
+					}
+					log.Debugf("isAuthBlockedForModel: BLOCKED auth=%s model=%s QuotaThresholdExceeded=true", auth.ID, model)
+					return true, blockReasonCooldown, next
 				}
 				if state.Unavailable {
 					if state.NextRetryAfter.IsZero() {
