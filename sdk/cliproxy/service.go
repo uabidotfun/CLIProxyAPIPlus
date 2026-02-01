@@ -718,7 +718,6 @@ func (s *Service) Run(ctx context.Context) error {
 				selector = &coreauth.RoundRobinSelector{}
 			}
 			s.coreManager.SetSelector(selector)
-			log.Infof("routing strategy updated to %s", nextStrategy)
 		}
 
 		s.applyRetryConfig(newCfg)
