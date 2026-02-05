@@ -59,6 +59,9 @@ type Service struct {
 	// server is the HTTP API server instance.
 	server *api.Server
 
+	// pprofServer manages the optional pprof HTTP debug server.
+	pprofServer *pprofServer
+
 	// serverErr channel for server startup/shutdown errors.
 	serverErr chan error
 
@@ -388,50 +391,48 @@ func (s *Service) wsOnDisconnected(channelID string, reason error) {
 		ID:     channelID,
 	})
 }
-
 func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.Auth) {
-	if s == nil || auth == nil || auth.ID == "" {
-		return
-	}
-	if s.coreManager == nil {
-		return
-	}
-	auth = auth.Clone()
-	s.ensureExecutorsForAuth(auth)
-
-	// 调试：检查 ModelStates 是否从文件正确加载
-	if len(auth.ModelStates) > 0 {
-		for model, state := range auth.ModelStates {
-			if state != nil && state.QuotaThresholdExceeded {
-				log.Debugf("applyCoreAuthAddOrUpdate: auth=%s model=%s QuotaThresholdExceeded=%v", auth.ID, model, state.QuotaThresholdExceeded)
-			}
+		if s == nil || s.coreManager == nil || auth == nil || auth.ID == "" {
+				return
 		}
-	}
+		auth = auth.Clone()
+		s.ensureExecutorsForAuth(auth)
 
-	existing, hasExisting := s.coreManager.GetByID(auth.ID)
-
-	// 重要：auth 文件的 metadata 变化（例如 quota/token 写回）会触发 watcher 更新。
-	// 但这类变化不应导致 antigravity 重新拉取模型列表，否则会出现写回→触发→重拉模型的循环。
-	shouldRegister := shouldRegisterModels(auth)
-	if !shouldRegister {
-		log.Debugf("skipping model registration for auth %s (provider=%s, hasExisting=%v)", auth.ID, auth.Provider, existing != nil)
-	}
-	if shouldRegister {
-		s.registerModelsForAuth(auth)
-	}
-
-	if hasExisting && existing != nil {
-		auth.CreatedAt = existing.CreatedAt
-		auth.LastRefreshedAt = existing.LastRefreshedAt
-		auth.NextRefreshAfter = existing.NextRefreshAfter
-		if _, err := s.coreManager.Update(ctx, auth); err != nil {
-			log.Errorf("failed to update auth %s: %v", auth.ID, err)
+		// 调试：检查 ModelStates 是否从文件正确加载（保留你的调试日志）
+		if len(auth.ModelStates) > 0 {
+				for model, state := range auth.ModelStates {
+						if state != nil && state.QuotaThresholdExceeded {
+								log.Debugf("applyCoreAuthAddOrUpdate: auth=%s model=%s QuotaThresholdExceeded=%v", auth.ID, model, state.QuotaThresholdExceeded)
+						}
+				}
 		}
-		return
-	}
-	if _, err := s.coreManager.Register(ctx, auth); err != nil {
-		log.Errorf("failed to register auth %s: %v", auth.ID, err)
-	}
+
+		// 采用 upstream 的顺序：先更新 coreManager
+		op := "register"
+		var err error
+		if existing, ok := s.coreManager.GetByID(auth.ID); ok {
+				auth.CreatedAt = existing.CreatedAt
+				auth.LastRefreshedAt = existing.LastRefreshedAt
+				auth.NextRefreshAfter = existing.NextRefreshAfter
+				op = "update"
+				_, err = s.coreManager.Update(ctx, auth)
+		} else {
+				_, err = s.coreManager.Register(ctx, auth)
+		}
+		if err != nil {
+				log.Errorf("failed to %s auth %s: %v", op, auth.ID, err)
+				current, ok := s.coreManager.GetByID(auth.ID)
+				if !ok || current.Disabled {
+						GlobalModelRegistry().UnregisterClient(auth.ID)
+						return
+				}
+				auth = current
+		}
+
+		// 使用你的节流逻辑（可选，如果需要避免循环）
+		if shouldRegisterModels(auth) {
+				s.registerModelsForAuth(auth)
+		}
 }
 
 func shouldRegisterModels(next *coreauth.Auth) bool {
@@ -676,6 +677,8 @@ func (s *Service) Run(ctx context.Context) error {
 	time.Sleep(100 * time.Millisecond)
 	fmt.Printf("API server started successfully on: %s:%d\n", s.cfg.Host, s.cfg.Port)
 
+	s.applyPprofConfig(s.cfg)
+
 	if s.hooks.OnAfterStart != nil {
 		s.hooks.OnAfterStart(s)
 	}
@@ -721,6 +724,7 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 
 		s.applyRetryConfig(newCfg)
+		s.applyPprofConfig(newCfg)
 		if s.server != nil {
 			s.server.UpdateClients(newCfg)
 		}
@@ -831,6 +835,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.authQueueStop != nil {
 			s.authQueueStop()
 			s.authQueueStop = nil
+		}
+
+		if errShutdownPprof := s.shutdownPprof(ctx); errShutdownPprof != nil {
+			log.Errorf("failed to stop pprof server: %v", errShutdownPprof)
+			if shutdownErr == nil {
+				shutdownErr = errShutdownPprof
+			}
 		}
 
 		// no legacy clients to persist
