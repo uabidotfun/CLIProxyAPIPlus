@@ -664,9 +664,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.ErrorLogsMaxFiles = 10
 	}
 
-	// Sync request authentication providers with inline API keys for backwards compatibility.
-	syncInlineAccessProvider(&cfg)
-
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
@@ -771,8 +768,32 @@ func payloadRawString(value any) ([]byte, bool) {
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
 // It trims whitespace, normalizes channel keys to lower-case, drops empty entries,
 // allows multiple aliases per upstream name, and ensures aliases are unique within each channel.
+// It also injects default aliases for channels that have built-in defaults (e.g., kiro)
+// when no user-configured aliases exist for those channels.
 func (cfg *Config) SanitizeOAuthModelAlias() {
-	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
+	if cfg == nil {
+		return
+	}
+
+	// Inject default Kiro aliases if no user-configured kiro aliases exist
+	if cfg.OAuthModelAlias == nil {
+		cfg.OAuthModelAlias = make(map[string][]OAuthModelAlias)
+	}
+	if _, hasKiro := cfg.OAuthModelAlias["kiro"]; !hasKiro {
+		// Check case-insensitive too
+		found := false
+		for k := range cfg.OAuthModelAlias {
+			if strings.EqualFold(strings.TrimSpace(k), "kiro") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
+		}
+	}
+
+	if len(cfg.OAuthModelAlias) == 0 {
 		return
 	}
 	out := make(map[string][]OAuthModelAlias, len(cfg.OAuthModelAlias))
@@ -920,18 +941,6 @@ func normalizeModelPrefix(prefix string) string {
 	return trimmed
 }
 
-func syncInlineAccessProvider(cfg *Config) {
-	if cfg == nil {
-		return
-	}
-	if len(cfg.APIKeys) == 0 {
-		if provider := cfg.ConfigAPIKeyProvider(); provider != nil && len(provider.APIKeys) > 0 {
-			cfg.APIKeys = append([]string(nil), provider.APIKeys...)
-		}
-	}
-	cfg.Access.Providers = nil
-}
-
 // looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.
 func looksLikeBcrypt(s string) bool {
 	return len(s) > 4 && (s[:4] == "$2a$" || s[:4] == "$2b$" || s[:4] == "$2y$")
@@ -1019,7 +1028,7 @@ func hashSecret(secret string) (string, error) {
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
-	persistCfg := sanitizeConfigForPersist(cfg)
+	persistCfg := cfg
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -1085,16 +1094,6 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	data = NormalizeCommentIndentation(buf.Bytes())
 	_, err = f.Write(data)
 	return err
-}
-
-func sanitizeConfigForPersist(cfg *Config) *Config {
-	if cfg == nil {
-		return nil
-	}
-	clone := *cfg
-	clone.SDKConfig = cfg.SDKConfig
-	clone.SDKConfig.Access = AccessConfig{}
-	return &clone
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
