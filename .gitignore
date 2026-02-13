@@ -56,3 +56,5 @@ _bmad-output/*
 *.pem
 *.cer
 data/*
+scripts
+refresh_tokens.json

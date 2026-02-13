@@ -1,0 +1,47 @@
+# Codemap 差异报告
+
+> 生成时间: 2026-02-07
+
+## 变更概要
+
+| 文件 | 状态 | 差异百分比 |
+|------|------|------------|
+| codemaps/architecture.md | 新建 | 100% |
+| codemaps/backend.md | 新建 | 100% |
+| codemaps/data.md | 新建 | 100% |
+| codemaps/frontend.md | 不适用 | N/A |
+
+## 说明
+
+本项目是纯 Go 后端项目，无前端代码。`codemaps/frontend.md` 文件不适用。
+
+## 项目统计
+
+- **总代码行数**: ~118,763 行
+- **Go 源文件数**: 426 个
+- **主要包数**: 27 个 internal + 8 个 SDK
+- **支持的提供商**: 10+
+
+## 核心文件分析
+
+### 最大的文件 (按行数)
+
+1. `internal/runtime/executor/kiro_executor.go` - 4101 行
+2. `test/thinking_conversion_test.go` - 2799 行
+3. `internal/auth/auth_files.go` - 2670 行
+4. `sdk/cliproxy/auth/conductor.go` - 2261 行
+5. `internal/config/config.go` - 1834 行
+
+### 核心架构组件
+
+1. **Service** (sdk/cliproxy/service.go) - 服务生命周期管理
+2. **Manager** (sdk/cliproxy/auth/conductor.go) - 核心认证协调
+3. **Executor** (internal/runtime/executor/) - 提供商 API 客户端
+4. **Translator** (internal/translator/) - API 格式转换
+5. **Watcher** (internal/watcher/) - 配置热重载
+
+## 首次生成
+
+这是首次生成 codemaps，因此所有文件都标记为"新建"，差异百分比为 100%。
+
+后续更新将计算增量差异，如果变更超过 30% 将请求用户确认。
