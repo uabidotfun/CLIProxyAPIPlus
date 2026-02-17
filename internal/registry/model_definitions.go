@@ -19,7 +19,9 @@ import (
 //   - codex
 //   - qwen
 //   - iflow
+//   - kimi
 //   - kiro
+//   - kilo
 //   - github-copilot
 //   - kiro
 //   - amazonq
@@ -43,10 +45,14 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetQwenModels()
 	case "iflow":
 		return GetIFlowModels()
+	case "kimi":
+		return GetKimiModels()
 	case "github-copilot":
 		return GetGitHubCopilotModels()
 	case "kiro":
 		return GetKiroModels()
+	case "kilo":
+		return GetKiloModels()
 	case "amazonq":
 		return GetAmazonQModels()
 	case "antigravity":
@@ -93,8 +99,10 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetOpenAIModels(),
 		GetQwenModels(),
 		GetIFlowModels(),
+		GetKimiModels(),
 		GetGitHubCopilotModels(),
 		GetKiroModels(),
+		GetKiloModels(),
 		GetAmazonQModels(),
 	}
 	for _, models := range allModels {
@@ -144,6 +152,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
 			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
 			ID:                  "gpt-5-mini",
@@ -156,6 +165,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			ContextLength:       128000,
 			MaxCompletionTokens: 16384,
 			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
 			ID:                  "gpt-5-codex",
@@ -168,6 +178,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
 			SupportedEndpoints:  []string{"/responses"},
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
 		},
 		{
 			ID:                  "gpt-5.1",
@@ -180,6 +191,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
 			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high"}},
 		},
 		{
 			ID:                  "gpt-5.1-codex",
@@ -192,6 +204,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
 			SupportedEndpoints:  []string{"/responses"},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high"}},
 		},
 		{
 			ID:                  "gpt-5.1-codex-mini",
@@ -204,6 +217,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			ContextLength:       128000,
 			MaxCompletionTokens: 16384,
 			SupportedEndpoints:  []string{"/responses"},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high"}},
 		},
 		{
 			ID:                  "gpt-5.1-codex-max",
@@ -216,6 +230,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
 			SupportedEndpoints:  []string{"/responses"},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
 		},
 		{
 			ID:                  "gpt-5.2",
@@ -228,6 +243,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
 			SupportedEndpoints:  []string{"/chat/completions", "/responses"},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
 		},
 		{
 			ID:                  "gpt-5.2-codex",
@@ -240,6 +256,7 @@ func GetGitHubCopilotModels() []*ModelInfo {
 			ContextLength:       200000,
 			MaxCompletionTokens: 32768,
 			SupportedEndpoints:  []string{"/responses"},
+			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
 		},
 		{
 			ID:                  "claude-haiku-4.5",
