@@ -193,7 +193,8 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "", fmt.Errorf("request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		// 将多行响应体压缩为单行，确保日志完整显示
+		return "", fmt.Errorf("request failed with status %d: %s", resp.StatusCode, strings.Join(strings.Fields(string(bodyBytes)), " "))
 	}
 
 	var loadResp map[string]any
@@ -328,14 +329,10 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 			continue
 		}
 
-		responsePreview := strings.TrimSpace(string(bodyBytes))
-		if len(responsePreview) > 500 {
-			responsePreview = responsePreview[:500]
-		}
-
-		responseErr := responsePreview
-		if len(responseErr) > 200 {
-			responseErr = responseErr[:200]
+		// 将多行响应体压缩为单行，确保日志完整显示
+		responseErr := strings.Join(strings.Fields(string(bodyBytes)), " ")
+		if len(responseErr) > 500 {
+			responseErr = responseErr[:500]
 		}
 		return "", fmt.Errorf("http %d: %s", resp.StatusCode, responseErr)
 	}

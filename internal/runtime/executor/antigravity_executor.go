@@ -1219,6 +1219,8 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	auth.Metadata["type"] = antigravityAuthType
 	if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
 		log.Warnf("antigravity executor: ensure project id failed: %v", errProject)
+		// 将错误记录到请求详细日志文件
+		recordAPIResponseError(ctx, e.cfg, fmt.Errorf("ensure project id failed: %v", errProject))
 	}
 	return auth, nil
 }
