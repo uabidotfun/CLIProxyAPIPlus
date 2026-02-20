@@ -59,3 +59,7 @@ _bmad-output/*
 data/*
 scripts
 refresh_tokens.json
+
+# 测试脚本运行时产物
+antigravity_error_report.txt
+antigravity_failed_accounts.txt
